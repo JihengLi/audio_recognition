@@ -1,0 +1,9 @@
+__pycache__/
+data/
+*.py[cod]
+*$py.class
+*.log
+*.npy
+.ipynb_checkpoints
+outputs/*
+.DS_Store
