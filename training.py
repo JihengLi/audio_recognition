@@ -9,11 +9,11 @@ from configs import *
 
 EPOCH_NUM = 100
 NUM_AUG_QUERIES = 3
-NTX_LOSS_TEM = 0.05
+NTX_LOSS_TEM = 0.2
 
 if __name__ == "__main__":
-    train_cache_path = "../dataset/dataset_cache/model2/cached_train_model2.pt"
-    val_cache_path = "../dataset/dataset_cache/model2/cached_val_model2.pt"
+    train_cache_path = "data/dataset_cache/dmresnet/train"
+    val_cache_path = "data/dataset_cache/dmresnet/val"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cfg = DimensionMaskedResNetConfig(

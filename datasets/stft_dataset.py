@@ -6,92 +6,72 @@ from .transforms import *
 
 
 class STFTDataset(Dataset):
+    """Waveform -> STFT magnitude (fmin-fmax) resized to 224×224×3."""
+
     def __init__(
         self,
-        file_paths,
-        bg_noise_list=None,
-        rir_noise_list=None,
-        split="train",
-        segment_seconds=10,
-        sample_rate=40000,
-        num_queries=3,
-        window_size=2560,
-        overlap_ratio=0.5,
-        f_min=50,
-        f_max=350,
-    ):
-        self.file_paths = file_paths
-        self.bg_noise_list = bg_noise_list
-        self.rir_noise_list = rir_noise_list
+        file_paths: Sequence[str],
+        *,
+        split: str = "train",
+        segment_sec: int = 10,
+        sample_rate: int = 40_000,
+        window_size: int = 2_560,
+        overlap_ratio: float = 0.5,
+        f_min: float = 50,
+        f_max: float = 350,
+        augment: Optional[WaveformAugment] = None,
+        num_queries: int = 3,
+        normalize: bool = False,
+        device: torch.device | None = None,
+    ) -> None:
+        super().__init__()
+        assert split in {"train", "val", "test"}
+        self.paths = list(file_paths)
         self.split = split
-        self.sample_rate = sample_rate
+        self.seg_len = int(segment_sec * sample_rate)
+        self.sr = sample_rate
         self.num_queries = num_queries
-        self.window_size = window_size
-        self.overlap_ratio = overlap_ratio
-        self.f_min = f_min
-        self.f_max = f_max
-        self.segment_samples = int(segment_seconds * sample_rate)
-        self.resize_transform = torchvision.transforms.Resize((224, 224))
+        self.device = device or torch.device("cpu")
+
+        self.stft_cfg = dict(
+            window_size=window_size,
+            overlap_ratio=overlap_ratio,
+            f_min=f_min,
+            f_max=f_max,
+            normalize=normalize,
+            device=self.device,
+        )
+        self.augment = augment.to(device) if split == "train" else None
+        self.resize = torchvision.transforms.Resize((224, 224))
 
     def __len__(self):
-        return len(self.file_paths)
+        return len(self.paths)
+
+    def _rand_crop(self, wav: torch.Tensor):
+        total = wav.shape[-1]
+        if total <= self.seg_len:
+            return wav
+        if self.split == "train":
+            start = random.randint(0, total - self.seg_len)
+        else:
+            start = max(0, (total - self.seg_len) // 2)
+        return wav[start : start + self.seg_len]
+
+    def _spec_3ch(self, wav: torch.Tensor):
+        spec = audio_to_stft(wav, **self.stft_cfg)
+        img = self.resize(spec.repeat(3, 1, 1))  # (3,H,W)
+        return img
 
     def __getitem__(self, idx):
-        file = self.file_paths[idx]
-        channels, _ = read_audio(file)
-        waveform = channels[0]
-        total_len = waveform.shape[0]
-
-        doc_wave = waveform
-        doc_spec = audio_to_stft(
-            doc_wave,
-            self.window_size,
-            self.overlap_ratio,
-            self.f_min,
-            self.f_max,
-        )
-        doc_3ch = doc_spec.repeat(3, 1, 1)
-        doc_3ch = self.resize_transform(doc_3ch)
-
+        path = self.paths[idx]
+        wav, _ = read_audio(path, target_fs=self.sr, mono=True)
+        wav_full = wav[0].to(self.device, non_blocking=True)
+        doc_img = self._spec_3ch(wav_full)
         queries = []
-        if self.split == "train":
-            for _ in range(self.num_queries):
-                if total_len > self.segment_samples:
-                    start = random.randint(0, total_len - self.segment_samples)
-                else:
-                    start = 0
-                end = start + self.segment_samples
-                query_wave = waveform[start:end]
-                query_wave_aug = augmentation_pipeline(
-                    query_wave, self.bg_noise_list, self.rir_noise_list
-                )
-                query_spec = audio_to_stft(
-                    query_wave_aug,
-                    self.window_size,
-                    self.overlap_ratio,
-                    self.f_min,
-                    self.f_max,
-                )
-                query_3ch = query_spec.repeat(3, 1, 1)
-                query_3ch = self.resize_transform(query_3ch)
-                queries.append(query_3ch)
-        elif self.split in ["val", "test"]:
-            start = min(
-                int(10 * self.sample_rate), max(0, total_len - self.segment_samples)
-            )
-            end = start + self.segment_samples
-            query_wave = waveform[start:end]
-            query_spec = audio_to_stft(
-                query_wave,
-                self.window_size,
-                self.overlap_ratio,
-                self.f_min,
-                self.f_max,
-            )
-            query_3ch = query_spec.repeat(3, 1, 1)
-            query_3ch = self.resize_transform(query_3ch)
-            queries.append(query_3ch)
-        else:
-            raise ValueError("Wrong split keyword. Expected 'train', 'val' or 'test'.")
-
-        return queries, doc_3ch
+        qn = self.num_queries if self.split == "train" else 1
+        for _ in range(qn):
+            seg = self._rand_crop(wav_full)
+            if self.augment:
+                seg = self.augment(seg.to(self.device))
+            queries.append(self._spec_3ch(seg))
+        return queries, doc_img

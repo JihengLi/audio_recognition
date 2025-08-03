@@ -20,7 +20,7 @@ class DimensionMaskedResNetConfig:
         self.scaler = self._build_scaler()
 
     def _build_dataloaders(self):
-        train_dataset = CachedDataset(self.train_cache_path)
+        train_dataset = LazyCachedDataset(self.train_cache_path)
         train_loader = DataLoader(
             train_dataset,
             batch_size=64,
@@ -30,7 +30,7 @@ class DimensionMaskedResNetConfig:
             drop_last=True,
             collate_fn=collate_fn_dif_length,
         )
-        val_dataset = CachedDataset(self.val_cache_path)
+        val_dataset = LazyCachedDataset(self.val_cache_path)
         val_loader = DataLoader(
             val_dataset,
             batch_size=64,

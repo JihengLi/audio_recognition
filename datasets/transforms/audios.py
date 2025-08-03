@@ -40,43 +40,41 @@ def audio_to_stft(
     normalize: bool = False,
     device: Optional[torch.device] = None,
 ) -> torch.Tensor:
-    if torch.is_tensor(channel_samples):
-        y = channel_samples.detach().cpu().numpy().astype(float)
+    device = device or (
+        channel_samples.device if torch.is_tensor(channel_samples) else "cpu"
+    )
+    if not torch.is_tensor(channel_samples):
+        y = torch.tensor(channel_samples, dtype=torch.float32, device=device)
     else:
-        y = np.array(channel_samples, dtype=float)
-    max_val = np.max(np.abs(y))
+        y = channel_samples.to(device, dtype=torch.float32)
+    max_val = y.abs().max()
     if max_val > 1.0:
         y = y / max_val
-    hop_length = int(window_size * overlap_ratio)
-    stft_matrix = librosa.stft(
-        y=y,
+    hop = int(window_size * overlap_ratio)
+    win = torch.hann_window(window_size, device=device)
+    spec = torch.stft(
+        y,
         n_fft=window_size,
-        hop_length=hop_length,
+        hop_length=hop,
         win_length=window_size,
+        window=win,
         center=True,
         pad_mode="reflect",
+        return_complex=True,
     )
-    magnitude = np.abs(stft_matrix)
-    db_spec = librosa.amplitude_to_db(
-        magnitude,
-        ref=np.max,
-        top_db=top_db,
-    )
-    freq_bins = db_spec.shape[0]
+    pow_spec = spec.abs().pow(2.0)
+    ref = pow_spec.max()
+    log_spec = 10 * torch.log10(torch.clamp(pow_spec, min=1e-10))
+    log_spec = torch.clamp(log_spec, min=ref.log10() * 10 - top_db)
     freq_res = fs / window_size
     bin_min = int(f_min / freq_res)
-    bin_max = int(f_max / freq_res) if f_max is not None else freq_bins
-    bin_min = max(0, bin_min)
-    bin_max = min(freq_bins, bin_max)
-    db_spec = db_spec[bin_min:bin_max, :]
-    spec_tensor = torch.tensor(db_spec, dtype=torch.float32)
-    if device is not None:
-        spec_tensor = spec_tensor.to(device)
+    bin_max = int(f_max / freq_res) if f_max else pow_spec.size(0)
+    log_spec = log_spec[bin_min:bin_max, :]
     if normalize:
-        mean = spec_tensor.mean(dim=1, keepdim=True)
-        std = spec_tensor.std(dim=1, unbiased=False, keepdim=True).clamp(min=1e-5)
-        spec_tensor = (spec_tensor - mean) / std
-    return spec_tensor
+        mu = log_spec.mean(dim=1, keepdim=True)
+        sigma = log_spec.std(dim=1, unbiased=False, keepdim=True).clamp(1e-5)
+        log_spec = (log_spec - mu) / sigma
+    return log_spec
 
 
 def audio_to_melspec(
@@ -92,6 +90,9 @@ def audio_to_melspec(
     normalize: bool = False,
     device: Optional[torch.device] = None,
 ) -> torch.Tensor:
+    device = device or (
+        channel_samples.device if torch.is_tensor(channel_samples) else "cpu"
+    )
     if not torch.is_tensor(channel_samples):
         waveform = torch.tensor(channel_samples, dtype=torch.float32)
     else:
@@ -111,11 +112,14 @@ def audio_to_melspec(
         power=power,
         center=True,
         pad_mode="reflect",
-    )
-    amp_to_db = torchaudio.transforms.AmplitudeToDB(stype="power", top_db=top_db)
+    ).to(device)
+    amp_to_db = torchaudio.transforms.AmplitudeToDB(
+        stype="power",
+        top_db=top_db,
+    ).to(device)
     spec = mel_transform(waveform)
     log_mel_spec = amp_to_db(spec)
-    log_mel_spec = log_mel_spec.squeeze(0)
+    log_mel_spec = log_mel_spec
     if normalize:
         mean = log_mel_spec.mean(dim=1, keepdim=True)
         std = log_mel_spec.std(dim=1, unbiased=False, keepdim=True).clamp(min=1e-5)

@@ -5,3 +5,4 @@ transformers
 faiss-cpu 
 librosa 
 pydub
+matplotlib

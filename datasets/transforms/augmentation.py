@@ -1,125 +1,170 @@
-import random, torch
+import random
+from typing import List, Optional, Sequence, Tuple
+
+import torch
+import torch.nn as nn
 import torch.nn.functional as F
+from torchaudio.functional import highpass_biquad, lowpass_biquad
 
 from .audios import read_audio
 
 
-def match_length(noise, target_length):
-    current_length = noise.shape[0]
-    if current_length == target_length:
-        return noise
-    elif current_length > target_length:
-        return noise[:target_length]
-    else:
-        repeats = (target_length // current_length) + 1
-        noise_extended = noise.repeat(repeats)[:target_length]
-        return noise_extended
+def _match_length(x: torch.Tensor, target_len: int) -> torch.Tensor:
+    cur = x.shape[-1]
+    if cur == target_len:
+        return x
+    if cur > target_len:
+        return x[..., :target_len]
+    rep = target_len // cur + 1
+    return x.repeat(rep)[..., :target_len]
 
 
-def augmentation_pipeline(
-    waveform,
-    bg_noise_list=None,
-    rir_noise_list=None,
-    p_gain=0.5,
-    p_noise=0.5,
-    p_reverb=0.5,
-    p_time_stretch=0,
-    p_pitch_shift=0.5,
-    p_time_shift=0.5,
-    gain_db_range=(-6, 6),
-    snr_range=(5, 25),
-    time_stretch_range=(0.8, 1.25),
-    pitch_shift_semitone_range=(-4, 4),
-    max_time_shift_fraction=0.1,
-):
+class WaveformAugment(nn.Module):
+    def __init__(
+        self,
+        sample_rate: int = 40000,
+        bg_noise_list: Optional[Sequence[str]] = None,
+        rir_noise_list: Optional[Sequence[str]] = None,
+        # probabilities
+        p_gain: float = 0.5,
+        p_noise: float = 0.3,
+        p_reverb: float = 0.25,
+        p_filter: float = 0.3,
+        p_compress: float = 0.2,
+        p_time_stretch: float = 0.15,
+        p_pitch_shift: float = 0.4,
+        p_time_shift: float = 0.5,
+        # ranges
+        gain_db_range: Tuple[float, float] = (-6, 6),
+        snr_range: Tuple[float, float] = (10, 25),
+        lowpass_freq_range: Tuple[int, int] = (3_000, 8_000),
+        highpass_freq_range: Tuple[int, int] = (40, 300),
+        time_stretch_range: Tuple[float, float] = (0.9, 1.1),
+        pitch_shift_semitone_range: Tuple[int, int] = (-3, 3),
+        max_time_shift_fraction: float = 0.1,
+        # compressor
+        compressor_threshold: float = 0.6,
+        compressor_ratio: float = 4.0,
+        # reproducibility
+        seed: int | None = None,
+    ) -> None:
+        super().__init__()
+        self.sr = sample_rate
+        self.bg_noise_list = list(bg_noise_list or [])
+        self.rir_noise_list = list(rir_noise_list or [])
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if not torch.is_tensor(waveform):
-        waveform = torch.tensor(waveform, dtype=torch.float32).to(device)
-    augmented = waveform.clone()
-
-    # 1. Stoachastic gain
-    if random.random() < p_gain:
-        gain_db = random.uniform(gain_db_range[0], gain_db_range[1])
-        gain_factor = 10 ** (gain_db / 20)
-        augmented = augmented * gain_factor
-
-    # 2. Stochastic noise injection
-    if (bg_noise_list is not None) and (random.random() < p_noise):
-        bg_noise_file = random.choice(bg_noise_list)
-        noise_channels, _ = read_audio(bg_noise_file)
-        noise_waveform = noise_channels[0]
-        if not torch.is_tensor(noise_waveform):
-            noise_waveform = torch.tensor(noise_waveform, dtype=torch.float32).to(
-                device
-            )
-        noise_waveform = match_length(noise_waveform, augmented.shape[0])
-        snr_db = random.uniform(snr_range[0], snr_range[1])
-        sig_power = augmented.pow(2).mean()
-        noise_power = noise_waveform.pow(2).mean()
-        target_noise_power = sig_power / (10 ** (snr_db / 10))
-        scaling_factor = (target_noise_power / noise_power).sqrt()
-        scaled_noise = noise_waveform * scaling_factor
-        augmented = augmented + scaled_noise
-
-    # 3. Room Impulse Response (RIR) reverb
-    if (rir_noise_list is not None) and (random.random() < p_reverb):
-        rir_file = random.choice(rir_noise_list)
-        rir_channels, _ = read_audio(rir_file)
-        rir_waveform = rir_channels[0]
-        if not torch.is_tensor(rir_waveform):
-            rir_waveform = torch.tensor(rir_waveform, dtype=torch.float32).to(device)
-        rir_waveform = rir_waveform / rir_waveform.abs().max()
-        augmented_ = augmented.unsqueeze(0).unsqueeze(0)  # (1, 1, L)
-        rir = rir_waveform.unsqueeze(0).unsqueeze(0)
-        pad = rir.shape[-1] // 2
-        augmented_ = F.conv1d(augmented_, rir, padding=pad)
-        augmented = augmented_.squeeze(0).squeeze(0)
-
-    # 4. Time stretch (simulate speed change)
-    if random.random() < p_time_stretch:
-        stretch_factor = random.uniform(time_stretch_range[0], time_stretch_range[1])
-        orig_length = augmented.shape[-1]
-        new_length = int(orig_length / stretch_factor)
-        augmented_ = F.interpolate(
-            augmented.unsqueeze(0).unsqueeze(0),
-            size=new_length,
-            mode="linear",
-            align_corners=False,
+        self.p_gain, self.gain_db_range = p_gain, gain_db_range
+        self.p_noise, self.snr_range = p_noise, snr_range
+        self.p_reverb = p_reverb
+        self.p_filter = p_filter
+        self.lowpass_freq_range, self.highpass_freq_range = (
+            lowpass_freq_range,
+            highpass_freq_range,
         )
-        augmented = F.interpolate(
-            augmented_, size=orig_length, mode="linear", align_corners=False
+        self.p_compress = p_compress
+        self.comp_thr, self.comp_ratio = compressor_threshold, compressor_ratio
+        self.p_time_stretch, self.time_stretch_range = (
+            p_time_stretch,
+            time_stretch_range,
+        )
+        self.p_pitch_shift, self.pitch_shift_semitone_range = (
+            p_pitch_shift,
+            pitch_shift_semitone_range,
+        )
+        self.p_time_shift, self.max_time_shift_fraction = (
+            p_time_shift,
+            max_time_shift_fraction,
+        )
+        self.rng = random.Random(seed)
+
+    def set_seed(self, seed: int) -> None:
+        self.rng.seed(seed)
+
+    def _aug_gain(self, y: torch.Tensor) -> torch.Tensor:
+        if self.rng.random() < self.p_gain:
+            g = self.rng.uniform(*self.gain_db_range)
+            y = y * 10 ** (g / 20)
+        return y
+
+    def _aug_noise(self, y: torch.Tensor) -> torch.Tensor:
+        if not (self.bg_noise_list and self.rng.random() < self.p_noise):
+            return y
+        n_path = self.rng.choice(self.bg_noise_list)
+        n_ch, _ = read_audio(n_path, target_fs=self.sr, mono=True)
+        n = _match_length(n_ch[0].to(y.device), y.shape[-1])
+        snr = self.rng.uniform(*self.snr_range)
+        yp, np_ = y.pow(2).mean(), n.pow(2).mean().clamp(1e-6)
+        n = n * (yp / (10 ** (snr / 10) * np_)).sqrt()
+        return y + n
+
+    def _aug_reverb(self, y: torch.Tensor) -> torch.Tensor:
+        if not (self.rir_noise_list and self.rng.random() < self.p_reverb):
+            return y
+        r_path = self.rng.choice(self.rir_noise_list)
+        r_ch, _ = read_audio(r_path, target_fs=self.sr, mono=True)
+        r = r_ch[0].to(y.device)
+        r /= r.abs().max()
+        pad = r.shape[-1] // 2
+        return F.conv1d(y[None, None], r[None, None], padding=pad).squeeze()
+
+    def _aug_filter(self, y: torch.Tensor) -> torch.Tensor:
+        if self.rng.random() >= self.p_filter:
+            return y
+        if self.rng.random() < 0.5:
+            fc = self.rng.randint(*self.lowpass_freq_range)
+            return lowpass_biquad(y, self.sr, fc)
+        fc = self.rng.randint(*self.highpass_freq_range)
+        return highpass_biquad(y, self.sr, fc)
+
+    def _aug_compress(self, y: torch.Tensor) -> torch.Tensor:
+        if self.rng.random() < self.p_compress:
+            m = y.abs() > self.comp_thr
+            y[m] = torch.sign(y[m]) * (
+                self.comp_thr + (y[m].abs() - self.comp_thr) / self.comp_ratio
+            )
+        return y
+
+    def _aug_time_stretch(self, y: torch.Tensor, orig_len: int) -> torch.Tensor:
+        if self.rng.random() >= self.p_time_stretch:
+            return y
+        sf = self.rng.uniform(*self.time_stretch_range)
+        n = int(orig_len / sf)
+        y = F.interpolate(y[None, None], size=n, mode="linear", align_corners=False)
+        return F.interpolate(
+            y, size=orig_len, mode="linear", align_corners=False
         ).squeeze()
 
-    # 5. Pitch shift (simulate pitch change)
-    if random.random() < p_pitch_shift:
-        n_semitones = random.uniform(
-            pitch_shift_semitone_range[0], pitch_shift_semitone_range[1]
-        )
-        factor = 2 ** (n_semitones / 12)
-        orig_length = augmented.shape[-1]
-        new_length = int(orig_length / factor)
-        augmented_ = F.interpolate(
-            augmented.unsqueeze(0).unsqueeze(0),
-            size=new_length,
-            mode="linear",
-            align_corners=False,
-        )
-        augmented = F.interpolate(
-            augmented_, size=orig_length, mode="linear", align_corners=False
+    def _aug_pitch_shift(self, y: torch.Tensor, orig_len: int) -> torch.Tensor:
+        if self.rng.random() >= self.p_pitch_shift:
+            return y
+        semi = self.rng.uniform(*self.pitch_shift_semitone_range)
+        factor = 2 ** (semi / 12)
+        n = int(orig_len / factor)
+        y = F.interpolate(y[None, None], size=n, mode="linear", align_corners=False)
+        return F.interpolate(
+            y, size=orig_len, mode="linear", align_corners=False
         ).squeeze()
 
-    # 6. Stochastic time shifting
-    if random.random() < p_time_shift:
-        max_shift = int(max_time_shift_fraction * augmented.shape[-1])
-        shift = random.randint(-max_shift, max_shift)
-        if shift > 0:
-            augmented = torch.cat(
-                (augmented[shift:], torch.zeros(shift, device=augmented.device)), dim=0
-            )
-        elif shift < 0:
-            augmented = torch.cat(
-                (torch.zeros(-shift, device=augmented.device), augmented[:shift]), dim=0
-            )
+    def _aug_roll(self, y: torch.Tensor) -> torch.Tensor:
+        if self.rng.random() < self.p_time_shift:
+            mx = int(self.max_time_shift_fraction * y.shape[-1])
+            shift = self.rng.randint(-mx, mx)
+            y = torch.roll(y, shift, -1)
+        return y
 
-    return augmented.cpu().numpy()
+    @torch.inference_mode()
+    def forward(self, wav: torch.Tensor | List[float]) -> torch.Tensor:
+        device = wav.device if torch.is_tensor(wav) else "cpu"
+        y = wav if torch.is_tensor(wav) else torch.tensor(wav, dtype=torch.float32)
+        y = y.to(device).clone()
+        orig_len = y.shape[-1]
+
+        y = self._aug_gain(y)
+        y = self._aug_noise(y)
+        y = self._aug_reverb(y)
+        y = self._aug_filter(y)
+        y = self._aug_compress(y)
+        y = self._aug_time_stretch(y, orig_len)
+        y = self._aug_pitch_shift(y, orig_len)
+        y = self._aug_roll(y)
+        return y.clamp_(-1.0, 1.0)

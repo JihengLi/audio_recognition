@@ -27,7 +27,6 @@ class ResidualBlock(nn.Module):
         identity = x
         out = self.relu(self.bn1(self.conv1(x)))
         out = self.bn2(self.conv2(out))
-        # Skip connection
         if self.downsample:
             identity = self.downsample(identity)
         out += identity
@@ -38,13 +37,11 @@ class ResidualBlock(nn.Module):
 class AudioEncoder(nn.Module):
     def __init__(self):
         super().__init__()
-        # Initial CNN layer
         self.conv0 = nn.Sequential(
             nn.Conv2d(1, 32, kernel_size=3, stride=(1, 1), padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
         )
-        # Residual blocks
         self.block1 = ResidualBlock(32, 32, stride=(1, 1))
         self.block2 = ResidualBlock(32, 64, stride=(2, 2))
         self.block3 = ResidualBlock(64, 128, stride=(2, 2))
@@ -114,16 +111,13 @@ class ProjectionHead(nn.Module):
     def __init__(self, in_dim, embedding_dim, hidden_dim):
         super().__init__()
         self.embedding_dim = embedding_dim
-        # Split in_dim into embedding_dim branches of length branch_dim
         branch_dim = in_dim // embedding_dim
-        # First linear layer for each branch (implemented as 1x1 conv with groups)
         self.fc1 = nn.Conv1d(
             branch_dim * embedding_dim,
             hidden_dim * embedding_dim,
             kernel_size=1,
             groups=embedding_dim,
         )
-        # Second linear layer for each branch
         self.fc2 = nn.Conv1d(
             hidden_dim * embedding_dim,
             1 * embedding_dim,
@@ -133,16 +127,13 @@ class ProjectionHead(nn.Module):
         self.act = nn.ELU()
 
     def forward(self, x):
-        # x shape: (B, in_dim)
         B = x.size(0)
-        # Reshape to (B, embedding_dim, branch_dim) then view as (B, branch_dim*embedding_dim, 1) for conv1d
         branch_dim = x.shape[1] // self.embedding_dim
         x = x.view(B, self.embedding_dim * branch_dim, 1)
-        out = self.fc1(x)  # (B, hidden_dim * embedding_dim, 1)
+        out = self.fc1(x)
         out = self.act(out)
-        out = self.fc2(out)  # (B, 1 * embedding_dim, 1)
-        out = out.view(B, self.embedding_dim)  # (B, embedding_dim)
-        # L2 normalize each embedding vector
+        out = self.fc2(out)
+        out = out.view(B, self.embedding_dim)
         out = out / out.norm(p=2, dim=1, keepdim=True)
         return out
 
@@ -166,9 +157,7 @@ class DimensionMaskedResNet(nn.Module):
         self.proj = ProjectionHead(in_dim, embedding_dim, hidden_dim)
 
     def forward(self, mel_spec):
-        features = self.encoder(mel_spec)  # (B, C=1024, F=3, T=3)
-        features_att = self.attention(
-            features
-        )  # apply attention and flatten to (B, 9216)
-        emb = self.proj(features_att)  # (B, 128) normalized
+        features = self.encoder(mel_spec)
+        features_att = self.attention(features)
+        emb = self.proj(features_att)
         return emb

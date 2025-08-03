@@ -97,12 +97,12 @@ def train_loop(
     best_val_loss = float("inf")
     for epoch in range(1, epochs + 1):
         # ——— Training ———
-        t_loss = t_cls = t_reg = 0.0
+        t_loss = 0.0
         steps = 0
         with gpu_safe_context():
             pbar = tqdm(train_loader, desc=f"Epoch {epoch} [Train]")
             for batch in pbar:
-                loss, c_loss, r_loss = process_train_batch(
+                loss = process_train_batch(
                     batch,
                     model,
                     optimizer,
@@ -115,46 +115,34 @@ def train_loop(
                 )
                 steps += 1
                 t_loss += loss
-                t_cls += c_loss
-                t_reg += r_loss
                 t_avg = t_loss / steps
                 pbar.set_postfix(
                     {
                         "loss": f"{loss:.4f}",
-                        "cls": f"{t_cls/steps:.4f}",
-                        "reg": f"{t_reg/steps:.4f}",
                         "avg": f"{t_avg:.4f}",
                         "lr": f"{scheduler.get_last_lr()[0]:.2e}",
                     }
                 )
         train_loss = t_loss / steps
-        train_cls = t_cls / steps
-        train_reg = t_reg / steps
         print(f"Epoch {epoch} — Train Avg Loss: {train_loss:.4f}")
 
         # ——— Validation ———
-        v_loss = v_cls = v_reg = 0.0
+        v_loss = 0.0
         v_steps = 0
         with gpu_safe_context():
             pbar = tqdm(val_loader, desc=f"Epoch {epoch} [Val]")
             for batch in pbar:
-                loss, c_loss, r_loss = process_val_batch(batch, model, device, loss_fn)
+                loss = process_val_batch(batch, model, device, loss_fn)
                 v_steps += 1
                 v_loss += loss
-                v_cls += c_loss
-                v_reg += r_loss
                 v_avg = v_loss / v_steps
                 pbar.set_postfix(
                     {
                         "loss": f"{loss:.4f}",
-                        "cls": f"{v_cls/v_steps:.4f}",
-                        "reg": f"{v_reg/v_steps:.4f}",
                         "v_avg": f"{v_avg:.4f}",
                     }
                 )
         val_loss = v_loss / v_steps
-        val_cls = v_cls / v_steps
-        val_reg = v_reg / v_steps
         print(f"Epoch {epoch} — Val Avg Loss: {val_loss:.4f}")
 
         lr = scheduler.get_last_lr()[0]
@@ -164,11 +152,7 @@ def train_loop(
                 [
                     epoch,
                     f"{train_loss:.6f}",
-                    f"{train_cls:.6f}",
-                    f"{train_reg:.6f}",
                     f"{val_loss:.6f}",
-                    f"{val_cls:.6f}",
-                    f"{val_reg:.6f}",
                     f"{lr:.6e}",
                 ]
             )

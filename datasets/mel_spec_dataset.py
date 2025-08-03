@@ -1,83 +1,85 @@
 import random
+from typing import List, Sequence, Optional
 
+import torch
 from torch.utils.data import Dataset
 
 from .transforms import *
 
 
+def seed_worker(worker_id: int) -> None:
+    base_seed = torch.initial_seed() % 2**32
+    random.seed(base_seed + worker_id)
+    torch.manual_seed(base_seed + worker_id)
+
+
 class MelSpecDataset(Dataset):
+    "Load waveform, apply optional augmentation, return log-mel specs."
+
     def __init__(
         self,
-        file_paths,
-        bg_noise_list=None,
-        rir_noise_list=None,
-        split="train",
-        segment_seconds=10,
-        sample_rate=40000,
-        num_queries=3,
-        window_size=2560,
-        overlap_ratio=0.5,
-        fs=40000,
-        n_mels=256,
-    ):
-        self.file_paths = file_paths
-        self.bg_noise_list = bg_noise_list
-        self.rir_noise_list = rir_noise_list
+        file_paths: Sequence[str],
+        split: str = "train",
+        segment_sec: int = 10,
+        sample_rate: int = 40_000,
+        window_size: int = 2_560,
+        overlap_ratio: float = 0.5,
+        n_mels: int = 256,
+        augment: Optional[WaveformAugment] = None,
+        num_queries: int = 3,
+        normalize: bool = False,
+        device: torch.device | None = None,
+    ) -> None:
+        super().__init__()
+        assert split in {"train", "val", "test"}
+
+        self.paths: List[str] = list(file_paths)
         self.split = split
-        self.sample_rate = sample_rate
+        self.seg_len = int(segment_sec * sample_rate)
+        self.sr = sample_rate
         self.num_queries = num_queries
-        self.window_size = window_size
-        self.overlap_ratio = overlap_ratio
-        self.fs = fs
-        self.n_mels = n_mels
-        self.segment_samples = int(segment_seconds * sample_rate)
+        self.device = device or torch.device("cpu")
 
-    def __len__(self):
-        return len(self.file_paths)
-
-    def __getitem__(self, idx):
-        file = self.file_paths[idx]
-        channels, _ = read_audio(file)
-        waveform = channels[0]
-        total_len = waveform.shape[0]
-
-        doc_wave = waveform
-        doc_spec = audio_to_melspec(
-            doc_wave,
-            self.window_size,
-            self.overlap_ratio,
-            self.fs,
-            self.n_mels,
+        self.mel_cfg = dict(
+            window_size=window_size,
+            overlap_ratio=overlap_ratio,
+            fs=sample_rate,
+            n_mels=n_mels,
+            normalize=normalize,
+            device=self.device,
         )
+        self.augment = augment.to(device) if split == "train" else None
+
+    def __len__(self) -> int:
+        return len(self.paths)
+
+    def _rand_crop(self, wav: torch.Tensor) -> torch.Tensor:
+        """Random crop for train, center crop for val/test."""
+        total = wav.shape[-1]
+        if total <= self.seg_len:
+            return wav
+
+        if self.split == "train":
+            start = random.randint(0, total - self.seg_len)
+        else:
+            start = max(0, (total - self.seg_len) // 2)
+        end = start + self.seg_len
+        return wav[start:end]
+
+    def __getitem__(self, idx: int):
+        path = self.paths[idx]
+        wav, _ = read_audio(path, target_fs=self.sr, mono=True)
+        wav_full = wav[0].to(self.device, non_blocking=True)
+
+        doc_spec = audio_to_melspec(wav_full, **self.mel_cfg)
 
         queries = []
-        if self.split == "train":
-            for _ in range(self.num_queries):
-                if total_len > self.segment_samples:
-                    start = random.randint(0, total_len - self.segment_samples)
-                else:
-                    start = 0
-                end = start + self.segment_samples
-                query_wave = waveform[start:end]
-                query_wave_aug = augmentation_pipeline(
-                    query_wave, self.bg_noise_list, self.rir_noise_list
-                )
-                query_spec = audio_to_melspec(
-                    query_wave_aug,
-                    self.window_size,
-                    self.overlap_ratio,
-                    self.fs,
-                    self.n_mels,
-                )
-                queries.append(query_spec)
-        elif self.split in ["val", "test"]:
-            start = min(
-                int(10 * self.sample_rate), max(0, total_len - self.segment_samples)
-            )
-            end = start + self.segment_samples
-            query_wave = waveform[start:end]
-            query_spec = audio_to_melspec(query_wave)
-            queries.append(query_spec)
-        else:
-            raise ValueError("Wrong split keyword. Expected 'train', 'val' or 'test'.")
+        q_n = self.num_queries if self.split == "train" else 1
+        for _ in range(q_n):
+            seg = self._rand_crop(wav_full)
+            if self.augment:
+                seg = self.augment(seg.to(self.device))
+            q_spec = audio_to_melspec(seg, **self.mel_cfg)
+            queries.append(q_spec)
+
         return queries, doc_spec
