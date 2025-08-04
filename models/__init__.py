@@ -1,2 +1,3 @@
-from .dmresnet import *
-from .resnet18 import *
+from .resnet import *
+from .blocks import *
+from .modules import *
