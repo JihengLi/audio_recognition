@@ -103,3 +103,46 @@ class ResidualSTANet(nn.Module):
         feat = self.encoder(x)
         feat = self.attn(feat).flatten(1)
         return self.proj(feat)
+
+
+class ResidualS2Net(nn.Module):
+    def __init__(
+        self,
+        stem_cls: Type[nn.Module] = Conv3Stem,
+        block_cls: Type[nn.Module] = ResidualS2Block,
+        num_in_ch: int = 1,
+        layers: Tuple[int, ...] = (1, 1, 1, 1, 1, 1),
+        channels: Tuple[int, ...] = (32, 64, 128, 256, 512, 1024),
+        pool_shape: Tuple[int, int] = (3, 3),
+        proj_hidden_dim: int = 4096,
+        emb_dim: int = 512,
+        reduction: int = 16,
+        sta_scale: float = 5.0,
+        drop_rate: float = 0.0,
+    ) -> None:
+        super().__init__()
+
+        block_kw: Dict[str, Any] = dict(
+            reduction=reduction, init_scale=sta_scale, drop_rate=drop_rate
+        )
+        self.encoder = ResidualEncoder(
+            stem_cls=stem_cls,
+            block_cls=block_cls,
+            num_in_channel=num_in_ch,
+            layers=layers,
+            channels=channels,
+            pool_shape=pool_shape,
+            block_kwargs=block_kw,
+        )
+
+        self.emb_dropout = nn.Dropout(drop_rate) if drop_rate > 0.0 else nn.Identity()
+        self.proj = ProjectionHead(
+            embedding_dim=emb_dim,
+            proj_hidden_dim=proj_hidden_dim,
+        )
+
+    def forward(self, x):
+        x = self.encoder(x)
+        x = x.flatten(1)
+        x = self.emb_dropout(x)
+        return self.proj(x)

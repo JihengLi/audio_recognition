@@ -1,10 +1,12 @@
 import gc, csv, os
 
 import torch
+import torch.nn as nn
 from torch.amp import autocast
 
 from contextlib import contextmanager
 from tqdm import tqdm
+from typing import Tuple
 
 
 @contextmanager
@@ -15,6 +17,20 @@ def gpu_safe_context():
         gc.collect()
         torch.cuda.empty_cache()
         raise e
+
+
+def make_dummy_input(
+    model: nn.Module, spatial_size: Tuple[int, int] = (256, 256)
+) -> torch.Tensor:
+    in_ch = None
+    for m in model.modules():
+        if isinstance(m, nn.Conv2d):
+            in_ch = m.in_channels
+            break
+    if in_ch is None:
+        raise RuntimeError()
+    H, W = spatial_size
+    return torch.zeros(1, in_ch, H, W, device=next(model.parameters()).device)
 
 
 def process_train_batch(

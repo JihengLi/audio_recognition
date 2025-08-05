@@ -29,20 +29,17 @@ class STABlock(nn.Module):
     def __init__(
         self,
         channels: int,
-        freq_bins: int,
-        time_bins: int,
+        F: int,
+        T: int,
         init_scale: float = 10.0,
     ):
         super().__init__()
+        self.F, self.T = F, T
         self.freq_conv = nn.Conv1d(channels, channels, 1, bias=True)
         self.time_conv = nn.Conv1d(channels, channels, 1, bias=True)
         nn.init.zeros_(self.freq_conv.bias)
         nn.init.zeros_(self.time_conv.bias)
-
-        self.gamma = nn.Parameter(torch.tensor(init_scale))
-
-        self.freq_bins = freq_bins
-        self.time_bins = time_bins
+        self.gamma = nn.Parameter(torch.full([], init_scale))
 
     def _spectral_attn(self, x):
         avgF = x.mean(dim=3)
@@ -65,7 +62,53 @@ class STABlock(nn.Module):
         return attnT
 
     def forward(self, x):
+        assert x.size(2) == self.F and x.size(3) == self.T
         aF = self._spectral_attn(x)
         aT = self._temporal_attn(x)
+        attn = aF * aT * self.gamma
+        return x * attn
+
+
+class STA2Block(nn.Module):
+    """Spectral-Temporal Attention Block with Bottleneck mechanism"""
+
+    def __init__(
+        self,
+        channels: int,
+        reduction: int = 16,
+        init_scale: float = 5.0,
+    ):
+        super().__init__()
+        self.freq_mlp = nn.Sequential(
+            nn.Conv1d(channels, channels // reduction, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(channels // reduction, channels, 1, bias=False),
+        )
+        self.time_mlp = nn.Sequential(
+            nn.Conv1d(channels, channels // reduction, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(channels // reduction, channels, 1, bias=False),
+        )
+        self.gamma = nn.Parameter(torch.full([], init_scale))
+
+    @staticmethod
+    def _pool_sum(x, dim: int):
+        return x.mean(dim=dim) + x.amax(dim=dim)
+
+    def _freq_attn(self, x):
+        y = self._pool_sum(x, dim=3)
+        y = self.freq_mlp(y)
+        y = torch.sigmoid(y).unsqueeze(-1)
+        return y
+
+    def _time_attn(self, x):
+        y = self._pool_sum(x, dim=2)
+        y = self.time_mlp(y)
+        y = torch.sigmoid(y).unsqueeze(2)
+        return y
+
+    def forward(self, x):
+        aF = self._freq_attn(x)
+        aT = self._time_attn(x)
         attn = aF * aT * self.gamma
         return x * attn
