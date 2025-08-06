@@ -91,8 +91,7 @@ class ResidualSTANet(nn.Module):
         )
 
         C = self.encoder.out_channels
-        F, T = self.encoder.out_pool
-        self.attn = STABlock(C, F, T, init_scale=sta_scale)
+        self.attn = STA2Block(C, init_scale=sta_scale)
 
         self.proj = ProjectionHead(
             embedding_dim=emb_dim,
@@ -109,7 +108,7 @@ class ResidualS2Net(nn.Module):
     def __init__(
         self,
         stem_cls: Type[nn.Module] = Conv3Stem,
-        block_cls: Type[nn.Module] = ResidualS2Block,
+        block_cls: Type[nn.Module] = ResidualSTABlock,
         num_in_ch: int = 1,
         layers: Tuple[int, ...] = (1, 1, 1, 1, 1, 1),
         channels: Tuple[int, ...] = (32, 64, 128, 256, 512, 1024),

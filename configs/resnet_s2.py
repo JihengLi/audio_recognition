@@ -8,7 +8,7 @@ from datasets import *
 from utils import *
 
 
-class ResidualS2NetConfig:
+class ResidualSTA2NetConfig:
     def __init__(self, train_cache_path, val_cache_path, epochs, device):
         self.train_cache_path = train_cache_path
         self.val_cache_path = val_cache_path

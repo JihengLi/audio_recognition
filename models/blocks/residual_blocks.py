@@ -131,7 +131,7 @@ class ResidualSEBlock(nn.Module):
         return out
 
 
-class ResidualS2Block(nn.Module):
+class ResidualSTABlock(nn.Module):
     """Block for ResNet with SE and ST attention"""
 
     expansion = 1

@@ -69,6 +69,43 @@ class STABlock(nn.Module):
         return x * attn
 
 
+class STASimpleBlock(nn.Module):
+    """Spectral-Temporal Attention Block"""
+
+    def __init__(
+        self,
+        channels: int,
+        F: int,
+        T: int,
+        init_scale: float = 10.0,
+    ):
+        super().__init__()
+        self.F, self.T = F, T
+        self.init_scale = init_scale
+
+        self.spectral_weight = nn.Parameter(torch.randn(1, channels, F))
+        self.temporal_weight = nn.Parameter(torch.randn(1, channels, T))
+
+    def _spectral_attn(self, x: torch.Tensor) -> torch.Tensor:
+        spectral_avg = x.mean(dim=3)
+        weighted = spectral_avg * self.spectral_weight
+        attnF = F.softmax(weighted, dim=2).unsqueeze(-1)
+        return attnF
+
+    def _temporal_attn(self, x: torch.Tensor) -> torch.Tensor:
+        temporal_avg = x.mean(dim=2)
+        weighted = temporal_avg * self.temporal_weight
+        attnT = F.softmax(weighted, dim=2).unsqueeze(2)
+        return attnT
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        assert x.size(2) == self.F and x.size(3) == self.T
+        aF = self._spectral_attn(x)
+        aT = self._temporal_attn(x)
+        attn = aF * aT * self.init_scale
+        return x * attn
+
+
 class STA2Block(nn.Module):
     """Spectral-Temporal Attention Block with Bottleneck mechanism"""
 

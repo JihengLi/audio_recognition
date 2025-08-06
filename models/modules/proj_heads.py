@@ -14,7 +14,7 @@ class ProjectionHead(nn.Module):
         super().__init__()
         self.embedding_dim = embedding_dim
         assert proj_hidden_dim % self.embedding_dim == 0
-        self.hidden_dim = proj_hidden_dim // self.embedding_dim
+        self.proj_hidden_dim = proj_hidden_dim
         self.l2_norm = l2_norm
         self.fc1: Optional[nn.Conv1d] = None
         self.fc2: Optional[nn.Conv1d] = None
@@ -25,12 +25,12 @@ class ProjectionHead(nn.Module):
         branch = in_dim // self.embedding_dim
         self.fc1 = nn.Conv1d(
             in_channels=branch * self.embedding_dim,
-            out_channels=self.hidden_dim * self.embedding_dim,
+            out_channels=self.proj_hidden_dim,
             kernel_size=1,
             groups=self.embedding_dim,
         ).to(device)
         self.fc2 = nn.Conv1d(
-            in_channels=self.hidden_dim * self.embedding_dim,
+            in_channels=self.proj_hidden_dim,
             out_channels=self.embedding_dim,
             kernel_size=1,
             groups=self.embedding_dim,
