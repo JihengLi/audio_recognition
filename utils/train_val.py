@@ -60,8 +60,6 @@ def process_train_batch(
     scheduler.step()
     loss_value = loss.detach().item()
 
-    del query_feat_batch, doc_feat_batch, query_emb, doc_emb, loss
-    torch.cuda.empty_cache()
     return loss_value
 
 
@@ -75,8 +73,6 @@ def process_val_batch(batch, model, device, loss_fn):
         loss = loss_fn(query_emb, doc_emb)
     loss_value = loss.item()
 
-    del query_feat_batch, doc_feat_batch, query_emb, doc_emb, loss
-    torch.cuda.empty_cache()
     return loss_value
 
 

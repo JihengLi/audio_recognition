@@ -149,3 +149,56 @@ class STA2Block(nn.Module):
         aT = self._time_attn(x)
         attn = aF * aT * self.gamma
         return x * attn
+
+
+class STCABlock(nn.Module):
+    """Combine Squeeze-Excitation and STA2 in one block"""
+
+    def __init__(
+        self,
+        channels: int,
+        reduction: int = 16,
+        init_scale: float = 5.0,
+    ):
+        super().__init__()
+        self.se_pool = nn.AdaptiveAvgPool2d(1)
+        self.se_mlp = nn.Sequential(
+            nn.Conv2d(channels, channels // reduction, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels // reduction, channels, 1, bias=False),
+            nn.Sigmoid(),
+        )
+        self.freq_mlp = nn.Sequential(
+            nn.Conv1d(channels, channels // reduction, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(channels // reduction, channels, 1, bias=False),
+        )
+        self.time_mlp = nn.Sequential(
+            nn.Conv1d(channels, channels // reduction, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(channels // reduction, channels, 1, bias=False),
+        )
+        self.gamma = nn.Parameter(torch.full([], init_scale))
+
+    @staticmethod
+    def _pool_sum(x, dim: int):
+        return x.mean(dim=dim) + x.amax(dim=dim)
+
+    def _freq_attn(self, x):
+        y = self._pool_sum(x, dim=3)
+        y = self.freq_mlp(y)
+        return torch.sigmoid(y).unsqueeze(-1)
+
+    def _time_attn(self, x):
+        y = self._pool_sum(x, dim=2)
+        y = self.time_mlp(y)
+        return torch.sigmoid(y).unsqueeze(2)
+
+    def forward(self, x):
+        se_scale = self.se_mlp(self.se_pool(x))
+        x_se = x * se_scale
+        aF = self._freq_attn(x_se)
+        aT = self._time_attn(x_se)
+        attn = aF * aT * self.gamma
+        out = x_se * attn
+        return out
